@@ -38,9 +38,9 @@ jobs:
 
       - name: Verify environment config
         run: |
-          if [ -z "${{ secrets.VITE_API_URL }}" ]; then
-            echo "##[error] Required secret VITE_API_URL is not configured in GitHub Secrets."
-            echo "##[error] Go to: Settings > Secrets and variables > Actions > New repository secret"
+          if [ -z "${{ secrets.PROD_DATABASE_URL }}" ]; then
+            echo "##[error] Required secret PROD_DATABASE_URL is not configured."
+            echo "##[error] Add it at: Settings > Secrets and variables > Actions"
             exit 1
           fi
           echo "Environment config verified."
