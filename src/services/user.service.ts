@@ -6,7 +6,12 @@ export interface User {
 }
 
 export function getUserById(id: number): User {
-  return { id, name: 'Demo User', email: 'user@example.com', age: 25 }
+  return {
+    id,
+    name: 'Demo User',
+    email: 'user@example.com',
+    age: 'twenty five',
+  }
 }
 
 export function calculateDiscount(price: number, userAge: number): number {
