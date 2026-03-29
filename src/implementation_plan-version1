@@ -1,0 +1,652 @@
+# Omni Demo — Full Implementation Plan
+
+## What We're Building
+
+```
+omni-demo-app (React + TypeScript + Vite)
+        ↓ GitHub Actions CI fails
+        ↓ GitHub sends workflow_run webhook
+        ↓
+Omni (github-logs-pipeline on Render)
+        ↓ fetches + filters logs
+        ↓ forwards to nova-incident-router
+        ↓
+Amazon Nova classifies the failure
+        ↓
+Router decides: retry / alert / rollback
+        ↓
+Slack → specific diagnosis message
+Dashboard → live update
+```
+
+---
+
+## Current State of omni-demo
+
+Already exists (`c:\Users\laxman\projects\Omni\omni-demo`):
+- ✅ React 19 + TypeScript ~5.9 + Vite
+- ✅ ESLint with `typescript-eslint` + react-hooks plugin
+- ✅ `tsconfig.app.json`, `tsconfig.node.json`
+- ✅ `tsc -b && vite build` in package.json scripts
+- ❌ No tests (Vitest not installed)
+- ❌ No GitHub Actions CI workflow
+- ❌ No failure branches
+- ❌ No trigger script
+- ❌ Not pushed to GitHub yet
+
+---
+
+## Part 1 — omni-demo App
+
+### Step 1.1 — Add the Business Logic Layer
+
+The app needs something real to break. Add a `UserService` with typed functions. This gives us a realistic codebase with:
+- Types that can be violated (TypeScript scenario)
+- Functions that can be tested (test failure scenario)
+- An env var it reads (missing env var scenario)
+
+**New file: `src/services/user.service.ts`** (on main — clean, working code)
+```typescript
+export interface User {
+  id: number
+  name: string
+  email: string
+  age: number
+}
+
+export function getUserById(id: number): User {
+  return { id, name: 'Demo User', email: 'user@example.com', age: 25 }
+}
+
+export function calculateDiscount(price: number, userAge: number): number {
+  if (userAge >= 60) return price * 0.2
+  if (userAge >= 18) return price * 0.1
+  return 0
+}
+
+export function formatUserDisplay(user: User): string {
+  return `${user.name} (${user.email})`
+}
+```
+
+**New file: `src/config.ts`** (on main — clean)
+```typescript
+export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+```
+
+---
+
+### Step 1.2 — Add Vitest
+
+```bash
+npm install -D vitest @vitest/coverage-v8
+```
+
+Add to `package.json` scripts:
+```json
+"test": "vitest run",
+"test:coverage": "vitest run --coverage"
+```
+
+**New file: `src/services/user.service.test.ts`** (on main — all tests pass)
+```typescript
+import { describe, it, expect } from 'vitest'
+import { calculateDiscount, formatUserDisplay } from './user.service'
+
+describe('calculateDiscount', () => {
+  it('gives 20% discount to seniors (60+)', () => {
+    expect(calculateDiscount(100, 65)).toBe(20)
+  })
+  it('gives 10% discount to adults (18-59)', () => {
+    expect(calculateDiscount(100, 30)).toBe(10)
+  })
+  it('gives no discount to minors', () => {
+    expect(calculateDiscount(100, 15)).toBe(0)
+  })
+})
+
+describe('formatUserDisplay', () => {
+  it('formats user correctly', () => {
+    const user = { id: 1, name: 'Alice', email: 'alice@test.com', age: 28 }
+    expect(formatUserDisplay(user)).toBe('Alice (alice@test.com)')
+  })
+})
+```
+
+---
+
+### Step 1.3 — The GitHub Actions CI Workflow
+
+**New file: `.github/workflows/ci.yml`** (on main — all steps pass)
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches:
+      - 'fail/**'   # ONLY runs on failure demo branches
+      - main
+
+jobs:
+  quality:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc -b
+
+      - name: Lint check
+        run: npx eslint .
+
+      - name: Run tests
+        run: npm test
+
+      - name: Security audit
+        run: npm audit --audit-level=high
+
+      - name: Verify environment config
+        run: |
+          if [ -z "${{ secrets.VITE_API_URL }}" ]; then
+            echo "##[error] Required secret VITE_API_URL is not configured in GitHub Secrets."
+            echo "##[error] Go to: Settings > Secrets and variables > Actions > New repository secret"
+            exit 1
+          fi
+          echo "Environment config verified."
+```
+
+> **Note:** On `main` and `fail/**` branches, this exact same workflow runs. The workflow file is identical everywhere. What differs is the **source code** on each branch.
+
+---
+
+### Step 1.4 — The 6 Failure Branches
+
+Each branch is created once from `main`, then one specific thing is broken.
+
+---
+
+#### Branch 1: `fail/typescript`
+**What's broken:** Type mismatch in `user.service.ts`
+**Which CI step fails:** `TypeScript type check`
+
+Change in `src/services/user.service.ts`:
+```typescript
+// BREAK: age should be number, assigned string
+export function getUserById(id: number): User {
+  return {
+    id,
+    name: 'Demo User',
+    email: 'user@example.com',
+    age: 'twenty five'   // ← Type 'string' is not assignable to type 'number'
+  }
+}
+```
+
+**What Nova sees in the log:**
+```
+src/services/user.service.ts:8:5 - error TS2322:
+Type 'string' is not assignable to type 'number'.
+  age: 'twenty five'
+  ~~~
+Found 1 error in src/services/user.service.ts:8
+```
+
+**Nova classifies:** `CodeBug` | severity 5 | action: alert
+
+---
+
+#### Branch 2: `fail/lint`
+**What's broken:** ESLint violation in `App.tsx`
+**Which CI step fails:** `Lint check`
+
+Add at the top of `src/App.tsx`:
+```typescript
+// BREAK: any type + console.log forbidden by typescript-eslint rules
+const debugData: any = { secret: 'omni-12345' }
+console.log('Debug:', debugData)
+```
+
+**What Nova sees in the log:**
+```
+/home/runner/work/omni-demo/src/App.tsx
+  3:18  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  4:1   error  Unexpected console statement              no-console
+
+✖ 2 problems (2 errors, 0 warnings)
+```
+
+**Nova classifies:** `CodeBug` | severity 4 | action: alert
+
+---
+
+#### Branch 3: `fail/tests`
+**What's broken:** Wrong assertion in `user.service.test.ts`
+**Which CI step fails:** `Run tests`
+
+Change in `src/services/user.service.test.ts`:
+```typescript
+it('gives 20% discount to seniors (60+)', () => {
+  // BREAK: 20% of 100 is 20, but we assert 50 (wrong)
+  expect(calculateDiscount(100, 65)).toBe(50)
+})
+```
+
+**What Nova sees in the log:**
+```
+FAIL src/services/user.service.test.ts > calculateDiscount > gives 20% discount to seniors (60+)
+AssertionError: expected 20 to be 50
+  - Expected: 50
+  + Received: 20
+
+Test Files  1 failed (1)
+Tests       1 failed (3 passed)
+```
+
+**Nova classifies:** `CodeBug` | severity 5 | action: alert
+
+---
+
+#### Branch 4: `fail/dependency`
+**What's broken:** Peer dependency version conflict in `package.json`
+**Which CI step fails:** `Install dependencies`
+
+Change in `package.json`:
+```json
+"dependencies": {
+  "react": "^19.2.4",
+  "react-dom": "^17.0.2"   // ← react-dom 17 requires react 17, but we have react 19
+}
+```
+
+**What Nova sees in the log:**
+```
+npm error code ERESOLVE
+npm error ERESOLVE unable to resolve dependency tree
+npm error
+npm error While resolving: omni-demo@0.0.0
+npm error Found: react@19.2.4
+npm error node_modules/react
+npm error   react@"^19.2.4" from the root project
+npm error
+npm error Could not resolve dependency:
+npm error peer react@"^17.0.0" from react-dom@17.0.2
+npm error node_modules/react-dom
+npm error   react-dom@"^17.0.2" from the root project
+```
+
+**Nova classifies:** `DependencyVersionConflict` | severity 6 | action: alert
+
+---
+
+#### Branch 5: `fail/security`
+**What's broken:** Known-vulnerable package added to `package.json`
+**Which CI step fails:** `Security audit`
+
+Add to `package.json` dependencies:
+```json
+"axios": "0.21.1"
+```
+
+`axios@0.21.1` has **CVE-2021-3749** (Regular Expression Denial of Service — High severity), which `npm audit --audit-level=high` catches.
+
+**What Nova sees in the log:**
+```
+# npm audit report
+
+axios  <0.21.2
+Severity: high
+Regular Expression Denial of Service in axios - https://github.com/advisories/GHSA-cph5-m8f7-6c5x
+fix available via `npm audit fix`
+node_modules/axios
+
+1 high severity vulnerability
+```
+
+**Nova classifies:** `CodeBug` (→ we'll add SecurityViolation category) | severity 8 | action: alert
+
+---
+
+#### Branch 6: `fail/missing-env`
+**What's broken:** `VITE_API_URL` secret is intentionally NOT set in `fail/missing-env` GitHub Secrets
+**Which CI step fails:** `Verify environment config`
+
+No code change needed on this branch. The CI step checks for the secret and it won't be there.
+
+> **Setup:** In GitHub Settings → Secrets, you add `VITE_API_URL` to all other branches' contexts, but you create a special environment called `demo-missing-env` that doesn't have it. Or simpler: just never set `VITE_API_URL` in secrets at all, and use a `needs-secret` input on the workflow.
+
+Actually simpler approach — **change the workflow on this branch only** to check for a unique secret name that won't exist:
+
+In `.github/workflows/ci.yml` on `fail/missing-env` branch, change the verify step to:
+```yaml
+- name: Verify environment config
+  run: |
+    if [ -z "${{ secrets.PROD_DATABASE_URL }}" ]; then
+      echo "##[error] Required secret PROD_DATABASE_URL is not configured."
+      echo "##[error] Add it at: Settings > Secrets and variables > Actions"
+      exit 1
+    fi
+```
+
+`PROD_DATABASE_URL` never exists in your secrets → step always fails.
+
+**What Nova sees in the log:**
+```
+##[error] Required secret PROD_DATABASE_URL is not configured.
+##[error] Add it at: Settings > Secrets and variables > Actions
+Error: Process completed with exit code 1.
+```
+
+**Nova classifies:** `ConfigMismatch` | severity 6 | action: alert
+
+---
+
+### Step 1.5 — trigger.sh Script
+
+**New file: `trigger.sh`** (on main)
+```bash
+#!/bin/bash
+# Omni Demo Trigger Script
+# Usage: ./trigger.sh <scenario>
+# Scenarios: typescript | lint | tests | dependency | security | missing-env
+
+SCENARIO=$1
+VALID=("typescript" "lint" "tests" "dependency" "security" "missing-env")
+
+# Validate input
+if [ -z "$SCENARIO" ]; then
+  echo "🧠 Omni Demo Trigger"
+  echo ""
+  echo "Usage: ./trigger.sh <scenario>"
+  echo ""
+  echo "Available scenarios:"
+  for s in "${VALID[@]}"; do
+    echo "  → $s"
+  done
+  exit 0
+fi
+
+VALID_SCENARIO=false
+for v in "${VALID[@]}"; do
+  if [ "$v" = "$SCENARIO" ]; then
+    VALID_SCENARIO=true
+    break
+  fi
+done
+
+if [ "$VALID_SCENARIO" = false ]; then
+  echo "❌ Unknown scenario: $SCENARIO"
+  echo "Valid: ${VALID[*]}"
+  exit 1
+fi
+
+BRANCH="fail/$SCENARIO"
+CURRENT=$(git branch --show-current)
+
+echo ""
+echo "🚀 Triggering Omni demo scenario: $SCENARIO"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Switch to branch, make empty commit, push, come back
+git checkout "$BRANCH" --quiet
+git commit --allow-empty -m "omni-demo: trigger $SCENARIO [$(date +%H:%M:%S)]" --quiet
+git push origin "$BRANCH" --quiet
+git checkout "$CURRENT" --quiet
+
+echo "✅ Pushed to $BRANCH"
+echo "⏳ GitHub Actions is running now..."
+echo "👀 Watch Omni catch it in:"
+echo "   → Slack #omni-alerts"
+echo "   → Dashboard on Render"
+echo ""
+```
+
+Make executable: `chmod +x trigger.sh`
+
+---
+
+## Part 2 — Omni Wiring (The Missing Bridge)
+
+### Step 2.1 — Connect github-logs-pipeline → nova-incident-router
+
+**File to modify:** `github-logs-pipeline/github_log_fetcher.py`
+
+After `fetch_and_process_logs()` processes all files and builds the filtered log, add:
+
+```python
+NOVA_ROUTER_URL = os.getenv("NOVA_ROUTER_URL", "http://localhost:8001/process")
+
+def forward_to_nova_router(filtered_log: str, owner: str, repo: str, run_id: int):
+    """Forward the high-signal log to Nova Incident Router for classification."""
+    try:
+        response = requests.post(
+            NOVA_ROUTER_URL,
+            data=filtered_log.encode("utf-8"),
+            headers={"Content-Type": "text/plain"},
+            timeout=30,
+        )
+        result = response.json()
+        log_to_file(f"🧠 Nova classified: {result.get('classification', {}).get('category')} "
+                    f"(severity={result.get('classification', {}).get('severity')})")
+        log_to_file(f"⚡ Action taken: {result.get('decision', {}).get('enforced_action')}")
+    except Exception as e:
+        log_to_file(f"⚠️  Failed to forward to Nova Router: {e}")
+```
+
+Call this at the end of `fetch_and_process_logs()`, passing the combined filtered output.
+
+---
+
+### Step 2.2 — Add 'Retry' Action to nova-incident-router
+
+**File: `nova-incident-router/backend/actions.py`**
+
+Add the retry action:
+```python
+async def trigger_workflow_retry(incident_id: str, run_id: str, owner: str, repo: str) -> dict:
+    """
+    Re-runs only the failed jobs via GitHub API.
+    Safe action — does not affect production.
+    POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs
+    """
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs"
+        await session.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=aiohttp.ClientTimeout(total=5),
+        )
+    return {
+        "status": "retried",
+        "incident_id": incident_id,
+        "action": "rerun-failed-jobs",
+    }
+```
+
+**File: `nova-incident-router/backend/router.py`**
+
+Add `TransientFailure` to the routing logic:
+```python
+# Transient failures → retry, not rollback
+TRANSIENT_CATEGORIES = {"TransientFailure"}
+
+if classification.category in TRANSIENT_CATEGORIES:
+    action = "retry"
+    priority = "P2"
+    notify_channels = []  # Silent retry — no Slack noise
+```
+
+---
+
+### Step 2.3 — Activate Real Slack With Diagnostic Messages
+
+**File: `nova-incident-router/backend/actions.py`**
+
+Replace the mock `send_slack_alert()` with a real call that includes the diagnosis:
+
+```python
+async def send_slack_alert(incident_id: str, classification: dict) -> dict:
+    category = classification.get("category", "Unknown")
+    severity = classification.get("severity", 0)
+    reason = classification.get("reason", "No details")
+
+    # Emoji and label per category
+    labels = {
+        "DependencyVersionConflict": ("📦", "Dependency Conflict"),
+        "CodeBug": ("🐛", "Code Fix Needed"),
+        "ConfigMismatch": ("🔑", "Config Issue"),
+        "MemoryExhaustion": ("💾", "Memory Issue"),
+        "DatabaseConnectionError": ("🗄️", "Database Error"),
+        "SecurityViolation": ("🚨", "Security Issue"),
+    }
+    emoji, label = labels.get(category, ("⚠️", "Build Failed"))
+
+    message = {
+        "text": f"{emoji} *{label}* | Severity: {severity}/10",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{emoji} *{label}* | `{incident_id}`\n> {reason}"
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"Severity: *{severity}/10* | Category: `{category}`"}
+                ]
+            }
+        ]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        await session.post(
+            os.environ["SLACK_WEBHOOK_URL"],
+            json=message,
+            timeout=aiohttp.ClientTimeout(total=3),
+        )
+
+    return {"status": "sent", "incident_id": incident_id, "channel": "#omni-alerts"}
+```
+
+---
+
+### Step 2.4 — Update Nova Classifier Categories
+
+**File: `nova-incident-router/backend/classifier.py`**
+
+Add new categories for GitHub Actions specific failures:
+```python
+class CrashClassification(BaseModel):
+    category: Literal[
+        "DependencyVersionConflict",
+        "ConfigMismatch",
+        "CodeBug",
+        "MemoryExhaustion",
+        "DatabaseConnectionError",
+        "TransientFailure",      # ← NEW: network timeout, rate limit, flaky
+        "SecurityViolation",     # ← NEW: CVE, secret scan, audit failure
+    ]
+```
+
+Update the system prompt to include these new categories with GitHub Actions examples.
+
+---
+
+## Part 3 — Infrastructure Setup
+
+### GitHub Setup
+
+1. **Push `omni-demo` to GitHub** as a public repo
+2. **Create the 6 failure branches** on GitHub
+3. **Add GitHub Secrets** to the repo:
+   - `VITE_API_URL` = `http://localhost:3000` (just a dummy value so the check passes on normal runs)
+   - (intentionally omit `PROD_DATABASE_URL` — the `fail/missing-env` branch looks for this)
+4. **Configure Webhook:**
+   - Repo Settings → Webhooks → Add webhook
+   - Payload URL: `https://your-github-logs-pipeline.onrender.com/github-webhook`
+   - Content type: `application/json`
+   - Events: Select **"Workflow runs"** only
+   - Active: ✅
+
+### Render Deployment
+
+Deploy two services on Render (both free tier):
+
+| Service | Repo | Root Dir | Start Command | Port |
+|:---|:---|:---|:---|:---|
+| `omni-logs-pipeline` | Omni | `github-logs-pipeline/` | `uvicorn github_log_fetcher:app --host 0.0.0.0 --port 8002` | 8002 |
+| `omni-nova-router` | Omni | `nova-incident-router/` | `uvicorn backend.main:app --host 0.0.0.0 --port 8001` | 8001 |
+
+**Env vars for `omni-logs-pipeline` on Render:**
+```
+GITHUB_TOKEN=ghp_xxxx
+NOVA_ROUTER_URL=https://omni-nova-router.onrender.com/process
+```
+
+**Env vars for `omni-nova-router` on Render:**
+```
+AWS_ACCESS_KEY_ID=xxxx
+AWS_SECRET_ACCESS_KEY=xxxx
+AWS_REGION=us-east-1
+NOVA_MODEL_ID=amazon.nova-lite-v1:0
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxxx
+GITHUB_TOKEN=ghp_xxxx
+MONGODB_URI=mongodb+srv://xxxx
+```
+
+### Slack Setup
+
+1. Create a Slack workspace (or use existing one)
+2. Create a channel: `#omni-alerts`
+3. Go to api.slack.com → Create App → Incoming Webhooks → Enable
+4. Add to Workspace → Select `#omni-alerts`
+5. Copy webhook URL → add to Render env vars
+
+---
+
+## Summary: What You Build, In Order
+
+| # | What | Where | Time |
+|:---|:---|:---|:---|
+| 1 | Add `UserService` + `user.service.test.ts` | `omni-demo/src/` | 20 min |
+| 2 | Install Vitest, update `package.json` scripts | `omni-demo/` | 10 min |
+| 3 | Create `.github/workflows/ci.yml` | `omni-demo/` | 15 min |
+| 4 | Push to GitHub, verify CI passes on main | GitHub | 10 min |
+| 5 | Create 6 failure branches with broken code | `omni-demo/` | 30 min |
+| 6 | Write `trigger.sh` | `omni-demo/` | 5 min |
+| 7 | Connect `github_log_fetcher.py` → nova-router | `github-logs-pipeline/` | 20 min |
+| 8 | Add retry action + update Slack message format | `nova-incident-router/` | 30 min |
+| 9 | Update classifier categories | `nova-incident-router/` | 15 min |
+| 10 | Deploy both services on Render | Render | 20 min |
+| 11 | Configure GitHub webhook on `omni-demo` repo | GitHub | 10 min |
+| 12 | Test end-to-end: `./trigger.sh typescript` | Terminal | 15 min |
+
+**Total estimated time: ~3.5 hours**
+
+---
+
+## Open Questions Before We Start
+
+> [!IMPORTANT]
+> 1. **Render free tier sleeps after inactivity.** Do you want to add an uptime monitor (e.g. UptimeRobot — free) to ping the service every 5 mins so it doesn't sleep during a demo?
+> 2. **Slack workspace** — do you have one already, or do we create a new one just for Omni demos?
+> 3. **MongoDB Atlas** — is the connection already working in `knowledge_base.py`, or has that not been tested yet? (Required for the nova-router to start)
+> 4. **The `fail/missing-env` scenario** needs a workflow file change on that branch. Are you okay with branches having slightly different workflow files, or do you want the trigger to be purely code-change based?
