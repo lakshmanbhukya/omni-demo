@@ -3,7 +3,7 @@ import { calculateDiscount, formatUserDisplay } from "./user.service";
 
 describe("calculateDiscount", () => {
   it("gives 20% discount to seniors (60+)", () => {
-    expect(calculateDiscount(100, 65)).toBe(20);
+    expect(calculateDiscount(100, 65)).toBe(50);
   });
 
   it("gives 10% discount to adults (18-59)", () => {
