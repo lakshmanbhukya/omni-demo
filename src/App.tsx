@@ -4,6 +4,9 @@ import viteLogo from './assets/vite.svg'
 import heroImg from './assets/hero.png'
 import './App.css'
 
+const debugData: any = { secret: 'omni-12345' }
+console.log('Debug:', debugData)
+
 function App() {
   const [count, setCount] = useState(0)
 
