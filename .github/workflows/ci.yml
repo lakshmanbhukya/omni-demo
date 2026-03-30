@@ -15,6 +15,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Simulate network timeout
+        run: |
+          node -e "const controller = new AbortController(); setTimeout(() => controller.abort(), 4000); fetch('https://10.255.255.1', { signal: controller.signal }).then(() => { console.error('Unexpected success'); process.exit(1); }).catch((error) => { console.error('Network timeout simulation:', error.name, error.message); process.exit(1); });"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
